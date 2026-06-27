@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "magpie.fullname" . }}-magpied
+  labels:
+    {{- include "magpie.labels" . | nindent 4 }}
+    app.kubernetes.io/component: magpied
+spec:
+  type: {{ .Values.magpied.service.type }}
+  ports:
+    # Single port carries both the OpAMP websocket (/v1/opamp) and the REST
+    # API (/api/v1/*) + /healthz. Splitting them is pointless — same process,
+    # same connection semantics.
+    - name: http
+      port: {{ .Values.magpied.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "magpie.magpiedSelectorLabels" . | nindent 4 }}

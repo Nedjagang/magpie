@@ -1,0 +1,28 @@
+apiVersion: v2
+name: magpie
+description: Magpie — opinionated OpenTelemetry distribution with fleet control plane
+type: application
+version: 0.2.0
+appVersion: "0.2.0-dev"
+# Ingress apiVersion networking.k8s.io/v1 is GA since 1.19; PVC default
+# storage class behavior and Deployment/Service semantics we rely on are
+# stable from 1.25 onward. Tested against 1.28.
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/magpie-project/magpie
+sources:
+  - https://github.com/magpie-project/magpie
+maintainers:
+  - name: The Magpie Authors
+keywords:
+  - opentelemetry
+  - observability
+  - otel
+  - opamp
+  - collector
+  - telemetry
+annotations:
+  # Surfaced by Artifact Hub and some registries; kept short so it doesn't
+  # dominate release notes.
+  artifacthub.io/changes: |
+    - kind: added
+      description: Initial chart — magpied Deployment + UI Deployment

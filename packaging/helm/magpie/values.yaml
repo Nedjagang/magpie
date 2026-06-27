@@ -1,0 +1,144 @@
+# Default values for the Magpie chart. See templates/*.yaml for what each
+# block feeds into.
+#
+# For most `helm install` invocations you'll need to override `magpied.image.repository`
+# (or `ui.image.repository`) unless you've pushed the stock images from this
+# repo to a registry your cluster can reach.
+
+# ── magpied: the Go control plane ────────────────────────────────────────
+magpied:
+  image:
+    # Override with your registry's copy if the default isn't reachable from
+    # the cluster (no public `magpie/magpied` image is published yet — build
+    # locally from `packaging/docker/Dockerfile` and load into kind/minikube,
+    # or push to your own registry).
+    repository: magpie/magpied
+    tag: ""              # defaults to Chart.appVersion when empty
+    pullPolicy: IfNotPresent
+  # magpied is intentionally single-replica: SQLite/WAL is not safe for
+  # concurrent-writer replicas. For multi-writer, switch to Postgres (ADR
+  # 0007) by pointing MAGPIE_DB_PATH at a libsql/postgres DSN — but that's
+  # out of scope for the default chart install.
+  replicaCount: 1
+  env:
+    # Explicitly set so the Deployment template can reference them. Override
+    # any of these via --set magpied.env.MAGPIE_X=...
+    MAGPIE_HTTP_ADDR: ":12002"
+    MAGPIE_DB_PATH: "/data/magpie.db"
+    MAGPIE_RELEASES_DIR: "/releases"
+  # Additional env vars can be passed as a plain map; merged into the block
+  # above at template time. Useful for secrets loaded via envFrom.
+  extraEnv: {}
+  # Bearer-token auth (v0.2). Three knobs:
+  #   1. Pass the literal token via --set magpied.auth.token=…  (NOT for prod;
+  #      lands in helm release manifest)
+  #   2. Or reference a pre-existing Secret with --set magpied.auth.existingSecret=… ;
+  #      the Secret must contain a key named MAGPIE_API_TOKEN
+  #   3. Leave empty to run in v0.1-compatible no-auth mode (with a startup warning)
+  auth:
+    token: ""
+    existingSecret: ""
+  service:
+    type: ClusterIP
+    port: 12002
+  resources:
+    # Magpied is lightweight — 10 MB binary, SQLite. Defaults sized for a
+    # few-thousand-agent fleet; bump if your UI feels sluggish.
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # SQLite persistence. Disable only for ephemeral dev clusters; loss of
+  # the PVC means loss of configs + audit + agents table.
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""     # empty → cluster default
+    accessModes:
+      - ReadWriteOnce
+    # If set, mounts the pre-existing PVC instead of creating one. Useful
+    # for bring-your-own-snapshot scenarios.
+    existingClaim: ""
+  # Releases volume — feeds /api/v1/releases/... so the UI's download
+  # button works. Populate the PVC with the `magpie-releases-<version>.tar.gz`
+  # bundle published by the release workflow (see docs/onboarding.md).
+  # If disabled, download endpoint returns 404s until you drop binaries in.
+  releasesPersistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    existingClaim: ""
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── ui: the Next.js dashboard ────────────────────────────────────────────
+# The UI is optional — if you prefer your own ops UI or only use the REST
+# API, set ui.enabled=false and the Deployment + Service are not rendered.
+ui:
+  enabled: true
+  image:
+    repository: magpie/ui
+    tag: ""
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 12001
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
+  podAnnotations: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# ── ingress: optional, off by default ────────────────────────────────────
+# When enabled, a single Ingress routes /api/* and /v1/opamp/* to magpied
+# and everything else to the UI, so both use same-origin (no CORS, no
+# rewrites to maintain). If you already run your own reverse proxy, leave
+# this disabled and point it at the two Services yourself.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: magpie.local
+  # tls:
+  #   - secretName: magpie-tls
+  #     hosts:
+  #       - magpie.local
+
+# ── serviceAccount ───────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""  # defaults to chart fullname when empty
+
+# Pod-level security context applied to both Deployments. Distroless already
+# runs as nonroot, but explicit settings here satisfy PodSecurity "restricted".
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# Pull secrets for private registries.
+imagePullSecrets: []

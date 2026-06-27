@@ -1,0 +1,93 @@
+# docker compose for the Magpie control plane.
+#
+# Brings up `magpied` + the UI on the same host so you can kick the tyres
+# end-to-end in ~5 minutes. Agents still run on the hosts they monitor —
+# this compose does not spawn them.
+#
+# Usage (from the repo root):
+#   docker compose -f packaging/docker/docker-compose.yml up -d
+#   docker compose -f packaging/docker/docker-compose.yml logs -f
+#   docker compose -f packaging/docker/docker-compose.yml down
+#
+# After startup:
+#   - UI             : http://<this-host>:12001
+#   - Agent OpAMP    : ws://<this-host>:12002/v1/opamp
+#
+# The UI proxies its REST calls to magpied via Next.js rewrites on the
+# internal Docker network, so browsers never need a separate URL for the
+# API. You can place the UI behind TLS / any hostname — it just works.
+#
+# The SQLite DB is persisted to the named volume magpie_data; remove it
+# with `docker volume rm magpie_data` if you want a clean slate.
+
+services:
+  magpied:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile
+      args:
+        VERSION: "1.0.0"
+    image: magpie/magpied:1.0.0
+    container_name: magpied
+    restart: unless-stopped
+    # Port 12002 is exposed on the host because AGENTS connect directly
+    # here (OpAMP WebSocket). Browsers do NOT hit this port anymore —
+    # they go through the UI proxy below.
+    #
+    # SECURITY: this bind is on all interfaces so remote agents can reach
+    # the OpAMP WebSocket. magpied has no auth in v0.1, so anyone who can
+    # reach this port from the network can publish configs to the entire
+    # fleet. Either run on a private network, or front this port with a
+    # reverse proxy that adds auth + TLS. For a single-host kick-the-tires
+    # demo, change to "127.0.0.1:12002:12002".
+    ports:
+      - "12002:12002"
+    environment:
+      # Where magpied looks for the per-platform agent zips it streams via
+      # /api/v1/releases/{os}/{arch}. Mounted from the repo root on the
+      # host so operators can populate it with `make release-bundle`
+      # without rebuilding the container.
+      MAGPIE_RELEASES_DIR: /releases
+      # Bearer token. Set on the host before `docker compose up` (or
+      # `--env-file packaging/docker/.env`); empty value keeps v0.1
+      # no-auth behavior. Generate with `openssl rand -base64 32`.
+      MAGPIE_API_TOKEN: "${MAGPIE_API_TOKEN:-}"
+      # Browser origins allowed to call magpied cross-origin. Same-origin
+      # behind a reverse proxy needs nothing here. The default lets the
+      # local UI container talk to magpied during compose-up dev loops.
+      MAGPIE_ALLOWED_ORIGINS: "${MAGPIE_ALLOWED_ORIGINS:-http://localhost:12001}"
+    volumes:
+      - magpie_data:/data
+      # Read-only mount of the host's releases dir. Empty at first start;
+      # magpied returns 404 + a hint until something lands here. Operators
+      # populate it via `make release-bundle` (cross-builds locally) or by
+      # extracting the magpie-releases-<ver>.tar.gz from a GitHub release.
+      - ../../releases:/releases:ro
+    healthcheck:
+      test: ["CMD", "/app/magpied", "--help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  ui:
+    build:
+      context: ../..
+      dockerfile: packaging/docker/Dockerfile.ui
+    image: magpie/ui:1.0.0
+    container_name: magpie-ui
+    restart: unless-stopped
+    # Loopback-only by default: the UI is for the operator running compose,
+    # not for the network. Remote browser access should go through a TLS
+    # reverse proxy (which routes /api/* and /v1/opamp/* to magpied as well
+    # — see ingress example in packaging/helm). To expose anyway, change
+    # to "12001:12001".
+    ports:
+      - "127.0.0.1:12001:12001"
+    depends_on:
+      - magpied
+    # No env vars needed. The UI's JS discovers the API URL from the hostname
+    # the browser loaded the page from, appending :12002. Works for any
+    # hostname/IP/proxy without rebuilding.
+
+volumes:
+  magpie_data:

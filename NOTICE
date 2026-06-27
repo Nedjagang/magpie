@@ -1,0 +1,9 @@
+Magpie
+Copyright 2026 The Magpie Authors
+
+This product includes software developed at
+The Magpie Project (https://github.com/magpie-project/magpie).
+
+This product depends on and redistributes software from the
+OpenTelemetry project (https://opentelemetry.io/), which is
+licensed under the Apache License 2.0.

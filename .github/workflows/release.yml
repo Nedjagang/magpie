@@ -1,0 +1,284 @@
+# Release workflow — builds magpie-agent, downloads the upstream
+# otelcol-contrib binary (per ADR 0008), and publishes them together as a
+# GitHub release on `v*` tags.
+#
+# Supply chain: we pull the pre-built otelcol-contrib binary from the
+# opentelemetry-collector-releases project and verify its SHA256 against
+# the checksums.txt published alongside the same release. The binary is
+# bundled UNMODIFIED — same name (`otelcol-contrib` / `.exe`), same hash —
+# so any operator can re-verify against upstream's public checksums.
+#
+# Upgrading otelcol-contrib: bump OTELCOL_VERSION below. No source changes
+# in the agent required; the supervisor exec's whatever binary is at
+# BinaryPath. Coordinate with user-config compatibility — read upstream
+# release notes before bumping minor versions.
+#
+# Outputs:
+#   - magpie-<os>-<arch>.zip — flat zip of magpie-agent + otelcol-contrib
+#     for operators to extract on the target host.
+#   - magpie-releases-<version>.tar.gz — the full set in the <os>-<arch>/
+#     layout that magpied's MAGPIE_RELEASES_DIR expects.
+#   - SHA256SUMS — checksums for everything above.
+#
+# Manual trigger via workflow_dispatch lets maintainers do a dry-run build
+# without tagging; the release job only runs on actual tag pushes.
+
+name: release
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # id-token: write is required for cosign keyless signing (Sigstore Fulcio
+  # mints a short-lived cert against the workflow's OIDC token). Same
+  # permission GitHub's own attestation actions request.
+  id-token: write
+
+env:
+  # Upstream otelcol-contrib version we ship. Bump carefully — this affects
+  # every host in every fleet that installs a Magpie release built from
+  # this workflow. Check upstream release notes for breaking config
+  # changes before moving off a tested version.
+  OTELCOL_VERSION: '0.116.0'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, goos: windows, goarch: amd64, ext: '.exe' }
+          - { runner: ubuntu-latest,  goos: linux,   goarch: amd64, ext: ''     }
+          - { runner: ubuntu-latest,  goos: linux,   goarch: arm64, ext: ''     }
+          - { runner: macos-latest,   goos: darwin,  goarch: arm64, ext: ''     }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: agent/go.mod
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${version}"
+
+      - name: Build magpie-agent
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p dist/staging
+          cd agent
+          go build -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION}" \
+            -o "../dist/staging/magpie-agent${{ matrix.ext }}" \
+            ./cmd/magpie-agent
+
+      - name: Fetch + verify upstream otelcol-contrib
+        shell: bash
+        env:
+          OS: ${{ matrix.goos }}
+          ARCH: ${{ matrix.goarch }}
+          EXT: ${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          # Upstream artifact naming:
+          #   otelcol-contrib_<version>_<os>_<arch>.tar.gz
+          # and a single checksums.txt for the whole release.
+          base="otelcol-contrib_${OTELCOL_VERSION}_${OS}_${ARCH}"
+          archive="${base}.tar.gz"
+          baseurl="https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}"
+          # Upstream prefixes the checksums file with the repo name; trying
+          # `checksums.txt` straight returns 404 (we found that out the hard
+          # way during a manual release-bundle build).
+          sumsfile="opentelemetry-collector-releases_otelcol-contrib_checksums.txt"
+
+          cd dist/staging
+          echo "→ downloading ${archive}"
+          curl -fsSL -o "${archive}" "${baseurl}/${archive}"
+          curl -fsSL -o checksums.txt "${baseurl}/${sumsfile}"
+
+          # Extract the expected SHA256 from the upstream checksums file.
+          # Line format:  "<sha256>  <filename>"
+          expected=$(grep "  ${archive}$" checksums.txt | awk '{print $1}')
+          if [ -z "${expected}" ]; then
+            echo "checksum not found for ${archive} in upstream checksums.txt"
+            exit 1
+          fi
+
+          # sha256sum ships on ubuntu + macOS (via coreutils) + windows-latest
+          # Git Bash. Use -c form for portability.
+          actual=$(sha256sum "${archive}" | awk '{print $1}')
+          if [ "${expected}" != "${actual}" ]; then
+            echo "SHA256 mismatch for ${archive}"
+            echo "  expected: ${expected}"
+            echo "  actual:   ${actual}"
+            exit 1
+          fi
+          echo "→ verified ${archive} sha256=${actual}"
+
+          # Upstream tarball contains the binary at the top level plus
+          # LICENSE, README etc. We keep only the binary.
+          tar -xzf "${archive}"
+          rm -f "${archive}" checksums.txt LICENSE README* CHANGELOG* || true
+          # Sanity: binary must exist.
+          if [ ! -f "otelcol-contrib${EXT}" ]; then
+            echo "post-extract: otelcol-contrib${EXT} not found in staging"
+            ls -la
+            exit 1
+          fi
+
+      # Cosign keyless signing of the magpie-agent binary. Keyless means
+      # no long-lived private key on the runner — Sigstore Fulcio mints
+      # a short-lived cert against the workflow's OIDC token (we requested
+      # id-token: write at the workflow level). Verification at the
+      # consumer end (install script) checks the cert chains to Fulcio
+      # and the signature matches the binary.
+      #
+      # Signing the bare binary, not the zip: the zip name + content vary
+      # per consumer (the magpied runtime builds a different zip per
+      # request than CI does), but the binary itself is identical bytes
+      # everywhere, so a sig over the binary is the only stable artifact.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign magpie-agent binary
+        shell: bash
+        env:
+          BIN: dist/staging/magpie-agent${{ matrix.ext }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --output-signature   "${BIN}.sig" \
+            --output-certificate "${BIN}.cert" \
+            "${BIN}"
+          ls -la "${BIN}" "${BIN}.sig" "${BIN}.cert"
+
+      - name: Package zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist/staging
+          # Include sig/cert in the zip so anyone who downloads it
+          # straight from a GitHub release page can verify out-of-band.
+          # magpied's runtime serving puts them in <platform>/ via the
+          # release-bundle tarball below, which the install script
+          # fetches from /api/v1/releases/<os>/<arch>/{signature,certificate}.
+          #
+          # Using 7z (not zip) because windows-latest's Git Bash doesn't
+          # have `zip` on PATH; 7z is preinstalled on all GitHub-hosted
+          # runners (linux/mac/windows). Output is a standard .zip via
+          # -tzip so the unzip steps in the release job and on operator
+          # hosts still work unchanged.
+          7z a -tzip "../magpie-${{ matrix.goos }}-${{ matrix.goarch }}.zip" \
+            "magpie-agent${{ matrix.ext }}" \
+            "magpie-agent${{ matrix.ext }}.sig" \
+            "magpie-agent${{ matrix.ext }}.cert" \
+            "otelcol-contrib${{ matrix.ext }}"
+          cd ..
+          rm -rf staging
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: magpie-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/magpie-${{ matrix.goos }}-${{ matrix.goarch }}.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all platform zips
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: magpie-*
+          merge-multiple: true
+
+      - name: Build releases-dir bundle
+        # Produces the exact directory layout magpied expects in
+        # $MAGPIE_RELEASES_DIR, so control-plane operators can untar it
+        # once and the /api/v1/releases endpoint works immediately.
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p bundle
+          for zip in dist/magpie-*.zip; do
+            name=$(basename "$zip" .zip)
+            platform="${name#magpie-}"
+            mkdir -p "bundle/${platform}"
+            unzip -o -q "$zip" -d "bundle/${platform}"
+          done
+          tar -czf "dist/magpie-releases-${version}.tar.gz" -C bundle .
+          ls -la dist/
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum magpie-*.zip magpie-releases-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/magpie-*.zip
+            dist/magpie-releases-*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            **Single host:** download the zip for your platform below, extract
+            both binaries into the same folder, then run `magpie-agent`
+            (Windows: `magpie-agent.exe`). See `docs/onboarding.md` for the
+            full install command.
+
+            **Control-plane operators:** download `magpie-releases-${{ github.ref_name }}.tar.gz`
+            and extract it into the directory pointed to by `MAGPIE_RELEASES_DIR`
+            (default `./releases`). The UI's download button will start working
+            immediately — no magpied restart needed.
+
+            **Collector binary:** this release bundles upstream
+            [`otelcol-contrib` v${{ env.OTELCOL_VERSION }}](https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v${{ env.OTELCOL_VERSION }}),
+            unmodified. Its SHA256 in our `SHA256SUMS` matches the upstream
+            `checksums.txt` — feel free to verify directly against theirs.
+
+            **Signature verification:** the `magpie-agent[.exe]` inside each zip
+            is signed with [Sigstore cosign](https://www.sigstore.dev/) keyless,
+            using the GitHub workflow's OIDC identity. Each zip carries the
+            detached `.sig` and `.cert` next to the binary. To verify:
+
+            ```bash
+            cosign verify-blob \
+              --certificate magpie-agent.cert \
+              --signature   magpie-agent.sig \
+              --certificate-identity-regexp 'https://github.com/[^/]+/magpie/\.github/workflows/release\.yml@.*' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              magpie-agent
+            ```
+
+            The install scripts (`install.sh` / `install.ps1`) run this verification
+            automatically when `cosign` is on PATH.

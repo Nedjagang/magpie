@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "magpie.fullname" . }}-magpied
+  labels:
+    {{- include "magpie.labels" . | nindent 4 }}
+    app.kubernetes.io/component: magpied
+spec:
+  replicas: {{ .Values.magpied.replicaCount }}
+  # Recreate (not RollingUpdate): magpied owns a SQLite file via ReadWriteOnce
+  # PVC. A rolling update would try to schedule a second pod that can't get
+  # the volume and gets stuck pending — Recreate terminates the old pod first.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "magpie.magpiedSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "magpie.magpiedSelectorLabels" . | nindent 8 }}
+      {{- with .Values.magpied.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "magpie.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: magpied
+          image: {{ include "magpie.magpiedImage" . | quote }}
+          imagePullPolicy: {{ .Values.magpied.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- range $k, $v := .Values.magpied.env }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- range $k, $v := .Values.magpied.extraEnv }}
+            - name: {{ $k }}
+              value: {{ $v | quote }}
+            {{- end }}
+            {{- if or .Values.magpied.auth.token .Values.magpied.auth.existingSecret }}
+            - name: MAGPIE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ default (printf "%s-auth" (include "magpie.fullname" .)) .Values.magpied.auth.existingSecret }}
+                  key: MAGPIE_API_TOKEN
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 12002
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            # magpied opens the DB before starting the HTTP listener; a
+            # cold start on a contended cluster can take ~15s.
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          volumeMounts:
+            {{- if .Values.magpied.persistence.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+            {{- if .Values.magpied.releasesPersistence.enabled }}
+            - name: releases
+              mountPath: /releases
+              readOnly: true
+            {{- end }}
+            # readOnlyRootFilesystem=true in containerSecurityContext forces
+            # us to mount an emptyDir for /tmp — goose's migration lock file
+            # and any future tempfiles need a writable path.
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.magpied.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.magpied.persistence.enabled }}
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.magpied.persistence.existingClaim | default (printf "%s-data" (include "magpie.fullname" .)) }}
+        {{- end }}
+        {{- if .Values.magpied.releasesPersistence.enabled }}
+        - name: releases
+          persistentVolumeClaim:
+            claimName: {{ .Values.magpied.releasesPersistence.existingClaim | default (printf "%s-releases" (include "magpie.fullname" .)) }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.magpied.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.magpied.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.magpied.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

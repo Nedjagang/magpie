@@ -1,0 +1,55 @@
+# Binaries
+/bin/
+/dist/
+/releases/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Go
+vendor/
+/.go-cache/
+
+# Node / UI
+node_modules/
+.next/
+out/
+.pnpm-store/
+
+# Env & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Runtime state
+magpie.db
+magpie.db-*
+magpie-agent-config.yaml
+.magpied.pid
+
+# Local developer state
+/.local/
+/tmp/
+Feedbacks.txt
+*.tsbuildinfo

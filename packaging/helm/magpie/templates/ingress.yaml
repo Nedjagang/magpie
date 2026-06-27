@@ -1,0 +1,68 @@
+{{- if .Values.ingress.enabled -}}
+{{- /*
+Single Ingress fronting both Services so the UI uses same-origin for its
+API calls — no CORS, no `__MAGPIE_API` override needed in the browser.
+
+Path rules, ORDER MATTERS (most-specific first):
+  /v1/opamp  → magpied  (WebSocket; agents connect here)
+  /api/...   → magpied  (REST API)
+  /healthz   → magpied  (health probes from external monitors)
+  /          → ui       (everything else)
+
+If you need different path rewrites (e.g. magpie at /magpie/* rather than /),
+override the template — keeping this simple is worth more than parameterizing
+every permutation.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "magpie.fullname" . }}
+  labels:
+    {{- include "magpie.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /v1/opamp
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "magpie.fullname" . }}-magpied
+                port:
+                  number: {{ .Values.magpied.service.port }}
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "magpie.fullname" . }}-magpied
+                port:
+                  number: {{ .Values.magpied.service.port }}
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: {{ include "magpie.fullname" . }}-magpied
+                port:
+                  number: {{ .Values.magpied.service.port }}
+          {{- if .Values.ui.enabled }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "magpie.fullname" . }}-ui
+                port:
+                  number: {{ .Values.ui.service.port }}
+          {{- end }}
+{{- end }}

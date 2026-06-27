@@ -1,0 +1,44 @@
+Magpie control plane {{ .Chart.AppVersion }} — release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+{{- if .Values.ingress.enabled }}
+
+Ingress enabled at host: {{ .Values.ingress.host }}
+  UI           → https://{{ .Values.ingress.host }}/
+  Agents OpAMP → ws{{ if .Values.ingress.tls }}s{{ end }}://{{ .Values.ingress.host }}/v1/opamp
+  REST API     → https://{{ .Values.ingress.host }}/api/v1/*
+
+{{- else }}
+
+No Ingress configured. Access the services via port-forward:
+
+  UI:      kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "magpie.fullname" . }}-ui {{ .Values.ui.service.port }}:{{ .Values.ui.service.port }}
+           → http://localhost:{{ .Values.ui.service.port }}
+  magpied: kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "magpie.fullname" . }}-magpied {{ .Values.magpied.service.port }}:{{ .Values.magpied.service.port }}
+           → http://localhost:{{ .Values.magpied.service.port }}/healthz
+           (agents will need this reachable from their hosts to connect via OpAMP)
+
+{{- end }}
+
+Onboard a host:
+  1. Open the UI, click a product, click "Onboard a host".
+  2. Download the zip for your platform (Windows / Linux / macOS).
+  3. Extract on the target host, run the displayed command.
+  4. The host appears in the UI within seconds.
+
+{{- if not .Values.magpied.releasesPersistence.enabled }}
+
+⚠  Download endpoint not provisioned: `magpied.releasesPersistence.enabled=false`.
+   The UI's download button will 404 until you populate /releases on magpied.
+   To enable:
+     helm upgrade {{ .Release.Name }} magpie/magpie --set magpied.releasesPersistence.enabled=true
+
+{{- else }}
+
+To populate /releases with agent binaries, copy a release bundle into the PVC, e.g.:
+  kubectl -n {{ .Release.Namespace }} cp magpie-releases-{{ .Chart.AppVersion }}.tar.gz \
+    {{ include "magpie.fullname" . }}-magpied-0:/releases/
+
+{{- end }}
+
+Config is persisted in the `{{ include "magpie.fullname" . }}-data` PVC (SQLite WAL).
+Back it up before running `helm uninstall` if you care about it.

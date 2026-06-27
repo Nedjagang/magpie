@@ -1,0 +1,53 @@
+# Dockerfile for the Magpie UI (Next.js).
+#
+# Multi-stage: install with pnpm, build production bundle, run with Next's
+# standalone output for a small runtime image.
+#
+# Build from the repo root:
+#   docker build -f packaging/docker/Dockerfile.ui -t magpie/ui:1.0.0 .
+
+# ── dependencies ───────────────────────────────────────────────────────
+FROM node:22-alpine AS deps
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+WORKDIR /app
+
+COPY ui/package.json ui/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# ── build ──────────────────────────────────────────────────────────────
+FROM node:22-alpine AS build
+RUN corepack enable && corepack prepare pnpm@9.12.0 --activate
+WORKDIR /app
+
+COPY --from=deps /app/node_modules ./node_modules
+COPY ui/ .
+
+# Ensure public/ exists so the runtime-stage COPY succeeds even when the
+# project has no static assets yet.
+RUN mkdir -p public
+
+# Build with standalone output so the runtime image can be tiny
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN pnpm build
+
+# ── runtime ────────────────────────────────────────────────────────────
+FROM node:22-alpine
+
+LABEL org.opencontainers.image.title="magpie-ui" \
+      org.opencontainers.image.description="Magpie control plane UI" \
+      org.opencontainers.image.source="https://github.com/magpie-project/magpie" \
+      org.opencontainers.image.licenses="Apache-2.0"
+
+WORKDIR /app
+ENV NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    PORT=12001
+
+# Next.js standalone output copies only the files the server actually needs
+COPY --from=build /app/public ./public
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
+
+EXPOSE 12001
+USER node
+CMD ["node", "server.js"]

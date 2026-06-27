@@ -1,0 +1,43 @@
+{{- /*
+Two PVCs, one for the SQLite DB and one (optional) for the releases dir.
+We split them because the DB PVC is always required for a functional
+install, but the releases PVC is a nice-to-have — operators who prefer
+to serve binaries from a mirror/GitHub release can leave it disabled.
+*/ -}}
+{{- if and .Values.magpied.persistence.enabled (not .Values.magpied.persistence.existingClaim) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "magpie.fullname" . }}-data
+  labels:
+    {{- include "magpie.labels" . | nindent 4 }}
+    app.kubernetes.io/component: magpied
+spec:
+  accessModes:
+    {{- toYaml .Values.magpied.persistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.magpied.persistence.size | quote }}
+  {{- with .Values.magpied.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.magpied.releasesPersistence.enabled (not .Values.magpied.releasesPersistence.existingClaim) }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "magpie.fullname" . }}-releases
+  labels:
+    {{- include "magpie.labels" . | nindent 4 }}
+    app.kubernetes.io/component: magpied
+spec:
+  accessModes:
+    {{- toYaml .Values.magpied.releasesPersistence.accessModes | nindent 4 }}
+  resources:
+    requests:
+      storage: {{ .Values.magpied.releasesPersistence.size | quote }}
+  {{- with .Values.magpied.releasesPersistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
